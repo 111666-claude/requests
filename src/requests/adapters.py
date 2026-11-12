@@ -631,6 +631,37 @@ class HTTPAdapter(BaseAdapter):
 
         return headers
 
+    @staticmethod
+    def _strip_proxy_authorization_if_unneeded(
+        request: PreparedRequest, proxies: dict[str, str] | None
+    ) -> None:
+        """Remove a ``Proxy-Authorization`` header that would otherwise be
+        sent to the wrong endpoint.
+
+        Proxy credentials are hop-by-hop: they belong to the proxy connection,
+        not to the origin request. urllib3 only injects its own proxy headers
+        on plain (non-CONNECT) proxy requests, but a header placed directly on
+        the PreparedRequest is passed through verbatim. Strip it when there is
+        no proxy (would leak to the origin) or when the request is tunneled via
+        CONNECT (would leak to the origin inside the encrypted tunnel).
+        """
+        headers = request.headers
+        if "Proxy-Authorization" not in headers:
+            return
+
+        proxy = select_proxy(request.url, proxies)
+        if proxy is None:
+            del headers["Proxy-Authorization"]
+            return
+
+        scheme = urlparse(request.url).scheme.lower()
+        proxy_scheme = urlparse(proxy).scheme.lower()
+        is_socks_proxy = proxy_scheme.startswith("socks")
+        if scheme == "https" and not is_socks_proxy:
+            # An HTTP proxy in front of an HTTPS origin uses CONNECT; the
+            # tunneled request is delivered to the origin, not the proxy.
+            del headers["Proxy-Authorization"]
+
     def send(
         self,
         request: PreparedRequest,
@@ -667,6 +698,7 @@ class HTTPAdapter(BaseAdapter):
 
         self.cert_verify(conn, request.url, verify, cert)
         url = self.request_url(request, proxies)
+        self._strip_proxy_authorization_if_unneeded(request, proxies)
         self.add_headers(
             request,
             stream=stream,

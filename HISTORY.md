@@ -4,7 +4,17 @@ Release History
 dev
 ---
 
-- \[Short description of non-trivial change.\]
+**Security**
+- Hardened credential isolation across proxies, redirects and authentication
+  retries. `Proxy-Authorization` is now treated as hop-by-hop: it is dropped
+  on direct connections (including a `NO_PROXY` bypass), on proxy switches
+  across redirects, and on tunneled (CONNECT) HTTPS requests, so proxy
+  credentials can no longer reach an origin server or an unrelated proxy.
+  `NO_PROXY` boundaries encountered mid-redirect now correctly force
+  re-computation of the connection and request headers. A non-rewindable
+  request body (generator or unseekable stream) now raises
+  `UnrewindableBodyError` instead of silently sending an empty or truncated
+  body on a 307/308 redirect or a digest-auth 401 retry.
 
 
 2.34.2 (2026-05-14)

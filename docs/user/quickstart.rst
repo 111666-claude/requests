@@ -224,7 +224,7 @@ Note: Custom headers are given less precedence than more specific sources of inf
   or at the path specified by the `NETRC` environment variable.
   Check details in :ref:`netrc authentication <authentication>`.
 * Authorization headers will be removed if you get redirected off-host.
-* Proxy-Authorization headers will be overridden by proxy credentials provided in the URL.
+* Proxy-Authorization headers will be overridden by proxy credentials provided in the URL. They are hop-by-hop: Requests removes them when a request is sent directly (including a NO_PROXY bypass) or is redirected to a different proxy, so proxy credentials are never forwarded to an origin or to an unrelated proxy.
 * Content-Length headers will be overridden when we can determine the length of the content.
 
 Furthermore, Requests does not change its behavior at all based on which custom headers are specified. The headers are simply passed on into the final request.

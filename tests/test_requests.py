@@ -650,14 +650,17 @@ class TestRequests:
                 session = requests.Session()
                 session.request(method="GET", url=httpbin())
 
-    def test_proxy_authorization_preserved_on_request(self, httpbin):
+    def test_proxy_authorization_stripped_without_proxy(self, httpbin):
+        # Proxy-Authorization is hop-by-hop: with no proxy selected it must
+        # never be delivered to the origin server.
         proxy_auth_value = "Bearer XXX"
         session = requests.Session()
+        session.trust_env = False
         session.headers.update({"Proxy-Authorization": proxy_auth_value})
         resp = session.request(method="GET", url=httpbin("get"))
         sent_headers = resp.json().get("headers", {})
 
-        assert sent_headers.get("Proxy-Authorization") == proxy_auth_value
+        assert "Proxy-Authorization" not in sent_headers
 
     @pytest.mark.parametrize(
         "url,has_proxy_auth",

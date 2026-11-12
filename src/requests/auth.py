@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Any, Final, cast, overload
 from ._internal_utils import to_native_string
 from .compat import basestring, str, urlparse
 from .cookies import extract_cookies_to_jar
+from .exceptions import UnrewindableBodyError
 from .utils import parse_dict_header
 
 if TYPE_CHECKING:
@@ -286,8 +287,21 @@ class HTTPDigestAuth(AuthBase):
         if self._thread_local.pos is not None:
             # Rewind the file position indicator of the body to where
             # it was to resend the request.
-            if (seek := getattr(r.request.body, "seek", None)) is not None:
-                seek(self._thread_local.pos)
+            seek = getattr(r.request.body, "seek", None)
+            if seek is None:
+                raise UnrewindableBodyError(
+                    "Cannot retry authentication with a non-rewindable request body."
+                )
+            seek(self._thread_local.pos)
+        elif r.request.body is not None and not isinstance(
+            r.request.body, (str, bytes)
+        ):
+            # A streamed/generator body without a recorded start position has
+            # already been consumed; re-sending it would deliver an empty or
+            # truncated body to the server.
+            raise UnrewindableBodyError(
+                "Cannot retry authentication with a non-rewindable request body."
+            )
         s_auth = r.headers.get("www-authenticate", "")
 
         if "digest" in s_auth.lower() and self._thread_local.num_401_calls < 2:

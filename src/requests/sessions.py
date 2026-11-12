@@ -32,6 +32,7 @@ from .exceptions import (
     ContentDecodingError,
     InvalidSchema,
     TooManyRedirects,
+    UnrewindableBodyError,
 )
 from .hooks import default_hooks, dispatch_hook
 
@@ -54,6 +55,7 @@ from .utils import (  # noqa: F401
     requote_uri,
     resolve_proxies,
     rewind_body,
+    select_proxy,
     should_bypass_proxies,  # re-export for external consumers
     to_key_val_list,
 )
@@ -122,6 +124,26 @@ def merge_hooks(
         return session_hooks
 
     return merge_setting(request_hooks, session_hooks, dict_class)
+
+
+def _is_rewindable_body(prepared_request: PreparedRequest) -> bool:
+    """Return whether the request body can be sent again on a redirect or an
+    authentication retry.
+
+    In-memory bodies (``bytes``/``str``) are trivially replayed. A file-like
+    body is only rewindable when its start position was recorded and it can be
+    seeked back to it; generator/iterator bodies are consumed as they are sent
+    and can never be replayed safely.
+    """
+    body = prepared_request.body
+    if body is None or isinstance(body, (str, bytes)):
+        return True
+
+    position = prepared_request._body_position
+    if isinstance(position, int) and hasattr(body, "seek"):
+        return True
+
+    return False
 
 
 class SessionRedirectMixin:
@@ -256,6 +278,17 @@ class SessionRedirectMixin:
                 for header in purged_headers:
                     prepared_request.headers.pop(header, None)
                 prepared_request.body = None
+            elif prepared_request.body is not None and not _is_rewindable_body(
+                prepared_request
+            ):
+                # 307/308 require re-sending the same body. A generator or a
+                # stream without a recorded position has already been consumed,
+                # so re-sending would deliver a truncated or empty body. Fail
+                # loudly instead of silently corrupting the retried request.
+                raise UnrewindableBodyError(
+                    "Cannot retry a non-rewindable request body on a "
+                    f"{resp.status_code} redirect."
+                )
 
             headers = prepared_request.headers
             headers.pop("Cookie", None)
@@ -343,17 +376,48 @@ class SessionRedirectMixin:
         redirect).
 
         This method also replaces the Proxy-Authorization header where
-        necessary.
+        necessary. The header is treated as proxy-bound credential material:
+        it is only retained when the request still goes through the *same*
+        proxy, and is dropped when the proxy changes, when the request becomes
+        direct (including a NO_PROXY boundary) or when the scheme changes so
+        that the credential would be sent somewhere it was never intended for.
 
         :rtype: dict
         """
         assert _is_prepared(prepared_request)
         headers = prepared_request.headers
         scheme = urlparse(prepared_request.url).scheme
+
+        # The proxy used by the previous hop is recorded on the request.
+        # Relying on the incoming proxies dict would not work during a
+        # redirect chain, because it is rebuilt each hop and already contains
+        # the new proxy by the time we get here.
+        old_proxy = prepared_request._proxy_url
+
         new_proxies = resolve_proxies(prepared_request, proxies, self.trust_env)
 
+        if should_bypass_proxies(
+            prepared_request.url, no_proxy=new_proxies.get("no_proxy")
+        ):
+            # A NO_PROXY boundary (or any other bypass) makes this a direct
+            # connection. Drop scheme/"all" proxy keys inherited from previous
+            # hops or the environment so they cannot be re-selected below;
+            # explicit per-host keys for other hosts are left untouched.
+            for key in (scheme, "all"):
+                new_proxies.pop(key, None)
+
+        new_proxy = select_proxy(prepared_request.url, new_proxies)
+
         if "Proxy-Authorization" in headers:
-            del headers["Proxy-Authorization"]
+            if new_proxy is None:
+                # Direct connection: proxy credentials must never be sent to
+                # the origin server.
+                del headers["Proxy-Authorization"]
+            elif old_proxy is not None and new_proxy != old_proxy:
+                # A different proxy serves this hop than the previous one:
+                # do not forward the old proxy's credentials. On the first hop
+                # (old_proxy is None) an explicitly provided header is kept.
+                del headers["Proxy-Authorization"]
 
         try:
             username, password = get_auth_from_url(new_proxies[scheme])
@@ -365,6 +429,7 @@ class SessionRedirectMixin:
         if not scheme.startswith("https") and username and password:
             headers["Proxy-Authorization"] = _basic_auth_str(username, password)
 
+        prepared_request._proxy_url = new_proxy
         return new_proxies
 
     def rebuild_method(
@@ -761,6 +826,11 @@ class Session(SessionRedirectMixin):
         kwargs.setdefault("cert", self.cert)
         if "proxies" not in kwargs:
             kwargs["proxies"] = resolve_proxies(request, self.proxies, self.trust_env)
+
+        # Record the proxy actually selected for this request so that
+        # rebuild_proxies() during a redirect can detect a proxy switch and
+        # isolate Proxy-Authorization accordingly.
+        request._proxy_url = select_proxy(cast(str, request.url), kwargs["proxies"])
 
         # It's possible that users might accidentally send a Request object.
         # Guard against that specific failure case.

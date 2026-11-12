@@ -403,6 +403,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
     body: _t.BodyType
     hooks: dict[str, list[_t.HookType]]
     _body_position: int | object | None
+    _proxy_url: str | None
 
     def __init__(self) -> None:
         #: HTTP verb to send to the server.
@@ -420,6 +421,10 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
         self.hooks = default_hooks()
         #: integer denoting starting position of a readable file-like body.
         self._body_position = None
+        #: proxy URL selected for the most recent (re)build of this request,
+        #: or None when the request is sent directly. Used to detect proxy
+        #: switches across redirects so Proxy-Authorization can be isolated.
+        self._proxy_url = None
 
     def prepare(
         self,
@@ -462,6 +467,7 @@ class PreparedRequest(RequestEncodingMixin, RequestHooksMixin):
         p.body = self.body
         p.hooks = self.hooks
         p._body_position = self._body_position
+        p._proxy_url = self._proxy_url
         return p
 
     def prepare_method(self, method: str | None) -> None:
